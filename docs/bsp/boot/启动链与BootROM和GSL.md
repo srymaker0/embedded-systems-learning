@@ -17,6 +17,11 @@ U-Boot 将 Linux 内核放入内存，准备启动参数，随后跳转到内核
 
 ## 阅读顺序
 
+启动源码中的寄存器、汇编、链接布局、运行环境和程序装载，见独立文章
+[从 C 代码到系统启动：读懂汇编、地址与运行环境](从C代码到系统启动.md)。
+其中按知识依赖连接了 GSL、U-Boot、内核与应用入口，可先阅读，再沿下面的具体
+启动链核对源码和配置。
+
 1. [程序、存储器与 BSP](#1-启动链中的程序和存储器)和[复位取指](#2-cpu-怎样执行第一条指令)：先弄清有哪些对象，以及启动的起点怎样建立。
 2. [GSL 的运行条件](#3-gsl-怎样准备内存和运行环境)和[U-Boot 的装载](#4-gsl-怎样找到并启动-u-boot)：理解 SRAM、DDR、镜像位置和入口地址之间的关系。
 3. [U-Boot 启动 Linux](#5-u-boot-怎样启动-linux)和[Linux 启动 EOS](#6-linux-怎样建立-eos-的运行环境)：沿已有源码连接引导程序、内核和用户态。
@@ -216,8 +221,14 @@ sram (rx) : ORIGIN = 0x4022600, LENGTH = 0x9400
 
 这份链接脚本还安排了后续放入 DDR 的代码和数据区域。GSL 早期使用 SRAM，
 DDR 可用后再搬运相应内容，使初始化前后的代码能使用各自需要的内存。
+文件中的符号、段与运行地址怎样关联，见[编译与链接](从C代码到系统启动.md#4-源码中的名字怎样变成地址)；
+`> ddr AT > sram` 的含义见[运行地址与装载地址](从C代码到系统启动.md#62-链接脚本中的运行地址与装载地址)。
 
 ### 3.3 从汇编入口到 C 函数
+
+下面的汇编同时涉及参数传递、栈和链接符号。它们的联系见
+[函数调用](从C代码到系统启动.md#1-一次-c-函数调用怎样变成-cpu-动作)和
+[C 运行环境](从C代码到系统启动.md#3-运行-c-代码以前需要准备什么)。
 
 [GSL 的 `boot/start.S`](../../../../hisilicon/hi3516cv610/sdk/Hi3516CV610_SDK_V1.0.2.0/smp/a7_linux/source/bsp/components/gsl/boot/start.S)
 从一条分支指令开始：
@@ -232,8 +243,10 @@ _start:
 机器指令；CPU 执行 `b` 时，根据编码确定目标地址。符号名帮助开发者阅读，运行
 所需的地址关系则保存在程序内容中。
 
-接下来的 `reset` 路径设置异常向量，并通过 `smc #0` 进入对应处理入口，再到达
-`boot`。随后完成栈和 `.bss` 初始化，才调用 `main_entry()`。相关指令摘录如下，
+接下来的 `reset` 路径把异常向量表地址写入相应的系统寄存器，再执行 `smc #0`。
+CPU 按异常规则进入向量表中对应的位置，该位置的分支指令引向 `boot`。这一过程见
+[SMC 与异常入口](从C代码到系统启动.md#53-gsl-的-smc-0-为什么能到达-boot)。
+随后完成栈和 `.bss` 初始化，才调用 `main_entry()`。相关指令摘录如下，
 保留与 C 运行环境有关的部分：
 
 ```asm
@@ -341,7 +354,8 @@ DDR 加载地址 A
 ```
 
 这三个位置之间的关系由镜像格式和启动实现决定。读代码时先辨认每个地址参与的
-动作，再判断它们为什么相同或不同。
+动作，再判断它们为什么相同或不同。链接时的运行地址，以及解压、复制、重定位
+对这些位置的影响，见[地址与搬运](从C代码到系统启动.md#6-为什么同一个程序会涉及多个地址)。
 
 ### 4.3 GSL 从哪里取得读取长度和目标地址
 
@@ -399,20 +413,45 @@ U-Boot 主体。看到多个地址时，应按这两个阶段分别理解。
 
 ### 5.1 从自身初始化进入自动启动
 
-U-Boot 主体也需要先准备栈、运行数据和板级资源，然后才进入命令处理与自动启动。
-ARM 入口可以从以下文件中的符号读起：
+U-Boot 主体获得控制权时，GSL 已经让 DDR 可用，解压代码也已经把主体放到
+`0x41800000`。接下来的工作是建立 U-Boot 自己的栈和运行数据、安排后续内存
+布局，再完成设备与命令系统初始化。主路径如下：
 
-| 源码 | 阅读入口 |
+```text
+_start → reset → _main
+                  │
+                  ├─ 建立早期栈和 global_data（gd）
+                  ├─ 调用 board_init_f(0)，计算后续内存布局
+                  ├─ 切换栈与 gd，搬运 U-Boot 并转到新位置执行
+                  ├─ 清零 .bss，建立完整 C 运行环境
+                  └─ 进入 board_init_r(...)，完成后续初始化
+                                      ↓
+                                main_loop()
+                                      ↓
+                           自动启动或交互式命令行
+```
+
+`gd` 是保存启动状态的结构体，包含 U-Boot 的目标地址、位置差值和后续栈等信息。
+`board_init_f()` 先把计算结果写进它，返回后由 `_main` 中的汇编读取这些结果，
+完成运行环境切换。`board_init_r()` 随后组织内存分配器、存储、环境变量和控制台
+等初始化。这两段 C 代码分开，源于它们执行时已经具备的运行条件不同。
+
+进入 `main_loop()` 后，U-Boot 根据环境和启动设置处理自动启动等待与启动命令。
+如果成功交接 Linux，CPU 接着执行内核；如果自动启动被中断或启动命令返回，
+后续命令循环提供串口交互环境。
+
+对应源码可以按以下动作定位：
+
+| 源码 | 对照的动作 |
 | --- | --- |
-| [`arch/arm/lib/vectors.S`](../../../../hisilicon/hi3516cv610/sdk/Hi3516CV610_SDK_V1.0.2.0/open_source/u-boot/u-boot-2022.07/arch/arm/lib/vectors.S) | `_start` 与复位分支 |
-| [`arch/arm/cpu/armv7/start.S`](../../../../hisilicon/hi3516cv610/sdk/Hi3516CV610_SDK_V1.0.2.0/open_source/u-boot/u-boot-2022.07/arch/arm/cpu/armv7/start.S) | `reset` 与 `_main` 调用 |
-| [`arch/arm/lib/crt0.S`](../../../../hisilicon/hi3516cv610/sdk/Hi3516CV610_SDK_V1.0.2.0/open_source/u-boot/u-boot-2022.07/arch/arm/lib/crt0.S) | `board_init_f()`、重定位和 `board_init_r()` |
-| [`common/main.c`](../../../../hisilicon/hi3516cv610/sdk/Hi3516CV610_SDK_V1.0.2.0/open_source/u-boot/u-boot-2022.07/common/main.c) | `main_loop()` 与自动启动逻辑 |
+| [`vectors.S`](../../../../hisilicon/hi3516cv610/sdk/Hi3516CV610_SDK_V1.0.2.0/open_source/u-boot/u-boot-2022.07/arch/arm/lib/vectors.S)、[`start.S`](../../../../hisilicon/hi3516cv610/sdk/Hi3516CV610_SDK_V1.0.2.0/open_source/u-boot/u-boot-2022.07/arch/arm/cpu/armv7/start.S) | 从 `_start` 进入 `reset`，再到 `_main` |
+| [`crt0.S`](../../../../hisilicon/hi3516cv610/sdk/Hi3516CV610_SDK_V1.0.2.0/open_source/u-boot/u-boot-2022.07/arch/arm/lib/crt0.S) | 准备栈与 `gd`，连接两段初始化和重定位 |
+| [`board_f.c`](../../../../hisilicon/hi3516cv610/sdk/Hi3516CV610_SDK_V1.0.2.0/open_source/u-boot/u-boot-2022.07/common/board_f.c)、[`board_r.c`](../../../../hisilicon/hi3516cv610/sdk/Hi3516CV610_SDK_V1.0.2.0/open_source/u-boot/u-boot-2022.07/common/board_r.c) | 安排内存布局，完成后续设备与运行环境初始化 |
+| [`main.c`](../../../../hisilicon/hi3516cv610/sdk/Hi3516CV610_SDK_V1.0.2.0/open_source/u-boot/u-boot-2022.07/common/main.c) | 处理启动命令与交互输入 |
 
-在 ARM 常规启动路径中，这两个初始化函数以重定位为界：`board_init_f()` 先
-完成早期准备，之后的代码搬运 U-Boot 并切换执行位置，`board_init_r()` 再组织
-后续初始化。进入 `main_loop()` 后，U-Boot 根据环境和启动设置处理倒计时、
-命令输入以及 `bootcmd`。串口上的 U-Boot 命令行就是这段引导软件提供的交互环境。
+寄存器传参、栈和重定位的完整解释见[从 C 代码到系统启动](从C代码到系统启动.md)。
+理解这些机制后，可以直接对照其中的
+[U-Boot 初始化](从C代码到系统启动.md#7-把这些机制放回-u-boot-初始化)阅读这段源码。
 
 ### 5.2 `bootcmd` 决定本次读取哪个系统镜像
 
@@ -495,6 +534,10 @@ U-Boot 的 ARM 交接代码会根据已经准备的内容，为 `r2` 选择设�
 中的 `stext`。这段汇编准备早期页表和地址空间切换所需的状态，再经过
 [`head-common.S`](../../../../hisilicon/hi3516cv610/sdk/Hi3516CV610_SDK_V1.0.2.0/open_source/linux/linux-5.10.y/arch/arm/kernel/head-common.S)
 中的 `__mmap_switched` 等步骤，进入 `start_kernel()`。
+
+页表记录地址转换所需的映射，MMU 根据它将虚拟地址转换为物理地址。内核必须先
+准备切换时需要的映射、栈和数据，才能沿新的地址继续运行。这个过程与前面的
+代码搬运分别改变什么，见[内核早期的地址转换](从C代码到系统启动.md#82-mmu-为什么出现在内核早期汇编里)。
 
 [`init/main.c`](../../../../hisilicon/hi3516cv610/sdk/Hi3516CV610_SDK_V1.0.2.0/open_source/linux/linux-5.10.y/init/main.c)
 接着建立内存管理、调度、中断等设施。后续 `rest_init()` 创建将执行
@@ -608,14 +651,16 @@ EOS 仓库的
 
 ### 6.5 ELF 入口怎样到达应用的 `main()`
 
-Shell 的 `exec` 请求内核用目标程序替换当前进程的程序映像。内核读取 ELF，
-建立用户地址空间，并准备开始执行的用户态位置。
+Shell 的 `exec` 请求内核用目标程序替换当前进程的程序映像。ELF 是保存程序
+及其入口、装载描述等信息的文件格式；内核按这些描述建立用户地址空间，并准备
+开始执行的用户态位置。
 
 如果 ELF 指定动态解释器，内核先安排执行动态加载器，再由加载器和程序运行时
 完成必要准备，最终进入应用的 `main()`；静态程序没有同样的动态解释器步骤。
 对应装载逻辑可在
 [`fs/binfmt_elf.c`](../../../../hisilicon/hi3516cv610/sdk/Hi3516CV610_SDK_V1.0.2.0/open_source/linux/linux-5.10.y/fs/binfmt_elf.c)
-中阅读。
+中阅读。应用入口、动态加载器和 `main()` 的关系，以及 `readelf` 各类信息的用途，
+见[应用的启动入口](从C代码到系统启动.md#84-应用的-_start-怎样到达-main)。
 
 到这里，启动过程已经从“在指定物理位置准备并执行引导代码”，走到了“由操作
 系统创建用户地址空间并执行应用”。EOS 后续使用设备和系统资源时，由 Linux
@@ -763,6 +808,8 @@ cat /proc/mounts
 - [Linux 5.10 UBIFS](https://docs.kernel.org/5.10/filesystems/ubifs.html)：MTD、UBI、UBIFS 及根卷参数。
 - [Linux 5.10 init 执行失败排查](https://docs.kernel.org/5.10/admin-guide/init.html)：根文件系统、init 和依赖的故障边界。
 - [GNU ld Entry Point](https://sourceware.org/binutils/docs/ld/Entry-Point.html)：链接入口的定义。
+- [Arm AAPCS32](https://github.com/ARM-software/abi-aa/blob/main/aapcs32/aapcs32.rst)：32 位 Arm 函数调用中的寄存器、参数传递和栈约定。
+- [GNU as ARM Opcodes](https://sourceware.org/binutils/docs/as/ARM-Opcodes.html)：`ldr =表达式`、`adr` 等汇编写法。
 
 源码链接中的 `sdk` 路径需要完成 SDK 准备；配套仓库布局见
 [学习仓库说明](../../../README.md#配套工作区)。相关版本见 [`scripts/versions.conf`](../../../../hisilicon/hi3516cv610/scripts/versions.conf)，

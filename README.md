@@ -6,6 +6,7 @@
 
 | 主题 | 文档 | 学习内容 |
 | --- | --- | --- |
+| 启动代码阅读基础 | [从 C 代码到系统启动：读懂汇编、地址与运行环境](docs/bsp/boot/从C代码到系统启动.md) | 寄存器、函数调用、栈、链接布局、异常入口、重定位，以及内核和应用的运行环境 |
 | BSP 与系统启动 | [从上电启动理解 BootROM、GSL 和 BSP](docs/bsp/boot/启动链与BootROM和GSL.md) | 复位取指、存储器、GSL、U-Boot、Linux 与用户态程序的启动关系，以及源码阅读与运行观察 |
 | 内核并发与对象回收 | [从 AI 取帧故障理解中断、自旋锁、RCU 和文件回收](docs/linux/concurrency/AI取帧故障排查与内核机制详解.md) | 音频中断、自旋锁、RCU 宽限期、文件对象积压、OOM 与故障定位 |
 | 文件缓存与内存分配 | [从 OTA 显示初始化失败理解文件缓存、内存回收与连续内存](docs/linux/memory/OTA显示初始化故障与Linux内存机制.md) | Page Cache 生命周期、脏页回写、伙伴系统、内存整理、DMA 分配与逐文件缓存管理 |
@@ -16,6 +17,7 @@
 docs/
 ├── bsp/
 │   └── boot/
+│       ├── 从C代码到系统启动.md
 │       └── 启动链与BootROM和GSL.md
 └── linux/
     ├── concurrency/
